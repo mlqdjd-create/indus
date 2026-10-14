@@ -29,6 +29,13 @@ SARVAM_BASE = os.environ.get("SARVAM_BASE", "https://api.sarvam.ai")
 SARVAM_KEY = os.environ.get("SARVAM_API_KEY", "")
 PROXY_TOKEN = os.environ.get("PROXY_TOKEN", "")
 
+# sarvam-105b is a reasoning model: with thinking on, the reasoning trace eats
+# the whole token budget and `content` comes back empty (the reply looks like it
+# stops halfway). We disable it by default. Set REASONING_EFFORT=low|medium|high
+# to re-enable it.
+REASONING_EFFORT = os.environ.get("REASONING_EFFORT", "none").strip().lower()
+MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "4096"))
+
 # Models served by Sarvam's /v1/chat/completions endpoint.
 MODELS = ["sarvam-105b", "sarvam-105b-conversations"]
 
@@ -78,14 +85,23 @@ def _normalize_messages(messages):
     return normalized
 
 
+def _apply_generation_params(payload: dict) -> dict:
+    # A generous output budget: the 2048 default can cut long code mid-way.
+    payload["max_tokens"] = MAX_TOKENS
+    # Disable the model's thinking (see REASONING_EFFORT above).
+    if REASONING_EFFORT in ("", "none", "off", "null"):
+        payload["reasoning_effort"] = None
+    else:
+        payload["reasoning_effort"] = REASONING_EFFORT
+    return payload
+
+
 def _build_chat_payload(body: dict) -> dict:
     payload = {k: v for k, v in body.items() if k in ALLOWED_FIELDS}
     payload["messages"] = _normalize_messages(body.get("messages"))
-    if "max_tokens" not in payload and "max_completion_tokens" in body:
-        payload["max_tokens"] = body["max_completion_tokens"]
     if payload.get("model") not in MODELS:
         payload["model"] = MODELS[0]
-    return payload
+    return _apply_generation_params(payload)
 
 
 # --------------------------------------------------------------------------- #
@@ -182,8 +198,6 @@ def _responses_to_chat(body: dict) -> dict:
             messages.append({"role": role, "content": _flatten_content(item.get("content"))})
 
     payload = {"model": body.get("model"), "messages": messages}
-    if "max_output_tokens" in body and body["max_output_tokens"]:
-        payload["max_tokens"] = body["max_output_tokens"]
     if "temperature" in body and body["temperature"] is not None:
         payload["temperature"] = body["temperature"]
     if "top_p" in body and body["top_p"] is not None:
@@ -198,7 +212,7 @@ def _responses_to_chat(body: dict) -> dict:
         payload["tool_choice"] = _convert_tool_choice(body["tool_choice"])
     if payload.get("model") not in MODELS:
         payload["model"] = MODELS[0]
-    return payload
+    return _apply_generation_params(payload)
 
 
 def _chat_to_responses(chat: dict, model: str) -> dict:
